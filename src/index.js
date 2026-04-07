@@ -47,9 +47,16 @@ app.use(limiter);
 // Body parser with size limits
 app.use(express.json({ limit: '10kb' }));
 
+// Validate color format (hex color)
+const isValidColor = (color) => {
+  if (!color || typeof color !== 'string') return true; // Color is optional
+  const hexColorRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
+  return hexColorRegex.test(color) || color === '';
+};
+
 // Input validation middleware
 const validateTaskInput = (req, res, next) => {
-  const { title } = req.body;
+  const { title, color } = req.body;
 
   if (!title || typeof title !== 'string') {
     return res.status(400).json({ error: 'Title is required and must be a string' });
@@ -59,6 +66,10 @@ const validateTaskInput = (req, res, next) => {
     return res.status(400).json({ error: 'Title must be between 1 and 500 characters' });
   }
 
+  if (color && !isValidColor(color)) {
+    return res.status(400).json({ error: 'Color must be a valid hex color (e.g., #FF6B6B)' });
+  }
+
   // Sanitize title
   req.body.title = title.trim();
   next();
@@ -66,7 +77,7 @@ const validateTaskInput = (req, res, next) => {
 
 // Sanitize update data
 const sanitizeUpdateData = (updates) => {
-  const allowedFields = ['title', 'completed'];
+  const allowedFields = ['title', 'completed', 'category', 'description', 'dueDate', 'color'];
   const sanitized = {};
 
   for (const key of Object.keys(updates)) {
@@ -75,6 +86,16 @@ const sanitizeUpdateData = (updates) => {
         sanitized[key] = updates[key].trim().substring(0, 500);
       } else if (key === 'completed' && typeof updates[key] === 'boolean') {
         sanitized[key] = updates[key];
+      } else if (key === 'category' && typeof updates[key] === 'string') {
+        sanitized[key] = updates[key].trim().substring(0, 100);
+      } else if (key === 'description' && typeof updates[key] === 'string') {
+        sanitized[key] = updates[key].trim().substring(0, 2000);
+      } else if (key === 'dueDate' && typeof updates[key] === 'string') {
+        sanitized[key] = updates[key].trim();
+      } else if (key === 'color' && typeof updates[key] === 'string') {
+        if (isValidColor(updates[key])) {
+          sanitized[key] = updates[key].trim();
+        }
       }
     }
   }
@@ -87,16 +108,21 @@ const formatTaskData = (doc) => {
   return {
     id: doc.id,
     title: data.title,
+    description: data.description || '',
+    color: data.color || '',
+    dueDate: data.dueDate || '',
     completed: data.completed,
-    createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
+    category: data.category || '',
+    createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt,
+    updatedAt: data.updatedAt?.toDate?.() ? data.updatedAt.toDate().toISOString() : new Date().toISOString()
   };
 };
 
 app.get('/tasks', async (req, res) => {
   try {
     // Pagination
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-    const offset = parseInt(req.query.offset) || 0;
+    const limit = Math.min(Number.parseInt(req.query.limit) || 50, 100);
+    const offset = Number.parseInt(req.query.offset) || 0;
 
     let query = db.collection('tasks').orderBy('createdAt', 'desc');
 
@@ -124,14 +150,24 @@ app.get('/tasks', async (req, res) => {
 
 app.post('/tasks', validateTaskInput, async (req, res) => {
   try {
-    const { title } = req.body;
+    const { title, description = '', color = '', dueDate = '', category = '' } = req.body;
+
+    // Validate color format
+    if (color && !isValidColor(color)) {
+      return res.status(400).json({ error: 'Color must be a valid hex color (e.g., #FF6B6B)' });
+    }
 
     const taskRef = db.collection('tasks').doc();
     const task = {
       id: taskRef.id,
       title,
+      description: typeof description === 'string' ? description.trim().substring(0, 2000) : '',
+      color: isValidColor(color) ? (typeof color === 'string' ? color.trim() : '') : '',
+      dueDate: typeof dueDate === 'string' ? dueDate.trim() : '',
+      category: typeof category === 'string' ? category.trim().substring(0, 100) : '',
       completed: false,
-      createdAt: FieldValue.serverTimestamp()
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp()
     };
 
     await taskRef.set(task);
@@ -166,6 +202,7 @@ app.patch('/tasks/:id', async (req, res) => {
       return res.status(404).json({ error: 'Task not found' });
     }
 
+    sanitizedUpdates.updatedAt = FieldValue.serverTimestamp();
     await taskRef.update(sanitizedUpdates);
 
     const updatedTask = await taskRef.get();
@@ -200,6 +237,58 @@ app.delete('/tasks/:id', async (req, res) => {
   }
 });
 
+app.get('/categories', async (req, res) => {
+  try {
+    const categoriesSnapshot = await db.collection('categories').orderBy('createdAt', 'desc').get();
+    const categories = [];
+
+    categoriesSnapshot.forEach(doc => {
+      const data = doc.data();
+      categories.push({
+        id: doc.id,
+        title: data.title,
+        description: data.description,
+        createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
+      });
+    });
+
+    res.json(categories);
+  } catch (error) {
+    console.error('Error fetching categories:', error);
+    res.status(500).json({ error: 'Failed to fetch categories' });
+  }
+});
+
+app.post('/categories', async (req, res) => {
+  try {
+    const { title, description } = req.body;
+
+    if (!title || typeof title !== 'string' || title.trim().length === 0 || title.length > 500) {
+      return res.status(400).json({ error: 'Title is required and must be a non-empty string up to 500 characters' });
+    }
+
+    const categoryRef = db.collection('categories').doc();
+    const category = {
+      id: categoryRef.id,
+      title: title.trim(),
+      description: typeof description === 'string' ? description.trim().substring(0, 1000) : '',
+      createdAt: FieldValue.serverTimestamp()
+    };
+
+    await categoryRef.set(category);
+
+    const createdCategory = await categoryRef.get();
+    res.status(201).json({
+      id: createdCategory.id,
+      title: createdCategory.data().title,
+      description: createdCategory.data().description,
+      createdAt: createdCategory.data().createdAt?.toDate?.() ? createdCategory.data().createdAt.toDate().toISOString() : createdCategory.data().createdAt
+    });
+  } catch (error) {
+    console.error('Error creating category:', error);
+    res.status(500).json({ error: 'Failed to create category' });
+  }
+});
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Route not found' });
